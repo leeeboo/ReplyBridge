@@ -1,0 +1,8 @@
+compose.env
+runtime.env
+secrets/
+bilibili-auth/
+staging/
+backups/
+*.tar
+*.tar.gz

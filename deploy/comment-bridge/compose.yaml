@@ -1,0 +1,93 @@
+name: shadowbrain-comment-bridge
+
+services:
+  data-init:
+    image: ${SHADOWBRAIN_IMAGE:?set SHADOWBRAIN_IMAGE in compose.env}
+    pull_policy: never
+    user: "${SHADOWBRAIN_UID:?set SHADOWBRAIN_UID in compose.env}:${SHADOWBRAIN_GID:?set SHADOWBRAIN_GID in compose.env}"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        chmod 0700 /var/lib/shadowbrain
+        find /var/lib/shadowbrain -type d -exec chmod 0700 {} +
+        find /var/lib/shadowbrain -type f -exec chmod 0600 {} +
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - type: volume
+        source: bridge-data
+        target: /var/lib/shadowbrain
+    restart: "no"
+
+  comment-bridge:
+    image: ${SHADOWBRAIN_IMAGE:?set SHADOWBRAIN_IMAGE in compose.env}
+    pull_policy: never
+    user: "${SHADOWBRAIN_UID:?set SHADOWBRAIN_UID in compose.env}:${SHADOWBRAIN_GID:?set SHADOWBRAIN_GID in compose.env}"
+    init: true
+    depends_on:
+      data-init:
+        condition: service_completed_successfully
+    env_file:
+      - path: ./runtime.env
+        required: true
+    environment:
+      SHADOWBRAIN_COMMENT_BRIDGE_DB: /var/lib/shadowbrain/comment-bridge.db
+      SHADOWBRAIN_FEISHU_APP_SECRET_FILE: /run/shadowbrain/secrets/feishu-app-secret
+      SHADOWBRAIN_YOUTUBE_CLIENT_FILE: /run/shadowbrain/secrets/youtube-client.json
+      SHADOWBRAIN_YOUTUBE_TOKEN_FILE: /run/shadowbrain/secrets/youtube-token.json
+      SHADOWBRAIN_BILIBILI_CREDENTIAL_FILE: /run/shadowbrain/bilibili-auth/credential.json
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - type: volume
+        source: bridge-data
+        target: /var/lib/shadowbrain
+      - type: bind
+        source: ./secrets/feishu-app-secret
+        target: /run/shadowbrain/secrets/feishu-app-secret
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./secrets/youtube-client.json
+        target: /run/shadowbrain/secrets/youtube-client.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./secrets/youtube-token.json
+        target: /run/shadowbrain/secrets/youtube-token.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./bilibili-auth
+        target: /run/shadowbrain/bilibili-auth
+        read_only: false
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD", "/app/shadowbrain-comment-bridge", "status", "--db", "/var/lib/shadowbrain/comment-bridge.db"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+    stop_grace_period: 45s
+    restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "5"
+
+volumes:
+  bridge-data:
+    name: ${SHADOWBRAIN_DATA_VOLUME:?set SHADOWBRAIN_DATA_VOLUME in compose.env}
+    external: true
