@@ -17,6 +17,7 @@ type Bridge struct {
 	Store                   *Store
 	Sources                 []CommentSource
 	Notifier                Notifier
+	YouTubeWebhook          Notifier
 	CredentialAlertNotifier CredentialAlertNotifier
 	Refreshers              map[Platform]CredentialRefresher
 	QRNotifier              CredentialQRNotifier
@@ -29,7 +30,8 @@ type Bridge struct {
 	// TargetChatID is persisted with every successful notification so a
 	// reaction on a message from a previously configured group cannot approve
 	// a platform write after the service changes groups.
-	TargetChatID string
+	TargetChatID        string
+	YouTubeTargetChatID string
 }
 
 // CredentialRefreshOnce advances one durable QR-login stage. Only the poll
@@ -244,7 +246,12 @@ func (b *Bridge) NotifyOnce(ctx context.Context) error {
 	if e != nil || j == nil {
 		return e
 	}
-	id, e := b.Notifier.NotifyComment(ctx, j.Comment, j.ActionID)
+	notifier := b.Notifier
+	webhook := j.Comment.Platform == PlatformYouTube && b.YouTubeWebhook != nil && b.YouTubeTargetChatID == ""
+	if webhook {
+		notifier = b.YouTubeWebhook
+	}
+	id, e := notifier.NotifyComment(ctx, j.Comment, j.ActionID)
 	if e != nil {
 		st := JobFailed
 		if IsUnknownOutcome(e) {
@@ -256,7 +263,17 @@ func (b *Bridge) NotifyOnce(ctx context.Context) error {
 		}
 		return nil
 	}
-	if markErr := b.Store.MarkNotificationSent(ctx, j.ActionID, id, b.TargetChatID); markErr != nil {
+	var markErr error
+	if webhook {
+		markErr = b.Store.MarkWebhookNotificationSent(ctx, j.ActionID)
+	} else {
+		chatID := b.TargetChatID
+		if j.Comment.Platform == PlatformYouTube && b.YouTubeTargetChatID != "" {
+			chatID = b.YouTubeTargetChatID
+		}
+		markErr = b.Store.MarkNotificationSent(ctx, j.ActionID, id, chatID)
+	}
+	if markErr != nil {
 		b.bestEffortNotificationUnknown(ctx, j.ActionID)
 		return markErr
 	}

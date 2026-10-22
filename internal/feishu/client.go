@@ -26,8 +26,9 @@ type Config struct {
 	AppID          string
 	AppSecret      string
 	ChatID         string
+	YouTubeChatID  string
 	AllowedOpenIDs []string
-	// AllowAllGroupMembers permits any human member of ChatID to reply by
+	// AllowAllGroupMembers permits human members of the configured groups to reply by
 	// directly quoting a bot notification. It is mutually exclusive with
 	// AllowedOpenIDs so operators cannot mistake it for an additional filter.
 	AllowAllGroupMembers bool
@@ -261,6 +262,13 @@ func New(config Config) (*Client, error) {
 	}, nil
 }
 
+func (c *Client) commentChatID(platform commentbridge.Platform) string {
+	if platform == commentbridge.PlatformYouTube && c.config.YouTubeChatID != "" {
+		return c.config.YouTubeChatID
+	}
+	return c.config.ChatID
+}
+
 // NotifyComment posts a human-readable notification to the configured group.
 // actionID is passed to Feishu as its one-hour request de-duplication UUID.
 func (c *Client) NotifyComment(ctx context.Context, comment commentbridge.Comment, actionID string) (string, error) {
@@ -271,7 +279,7 @@ func (c *Client) NotifyComment(ctx context.Context, comment commentbridge.Commen
 	if err != nil {
 		return "", fmt.Errorf("encode feishu notification: %w", err)
 	}
-	messageID, definiteRejection, err := c.sender.Send(ctx, outgoingMessage{ChatID: c.config.ChatID, MsgType: "text", Content: string(content), UUID: feishuUUID(actionID)})
+	messageID, definiteRejection, err := c.sender.Send(ctx, outgoingMessage{ChatID: c.commentChatID(comment.Platform), MsgType: "text", Content: string(content), UUID: feishuUUID(actionID)})
 	if err != nil {
 		if definiteRejection {
 			return "", err
@@ -475,27 +483,18 @@ func feishuUUID(actionID string) string {
 const maxNotificationRunes = 3400
 
 func notificationText(comment commentbridge.Comment) string {
-	footer := notificationFooter(comment.Platform)
-	author := notificationAuthor(comment)
-	prefix := fmt.Sprintf("%s\n平台：%s\n视频：%s\n链接：%s\n作者：%s\n评论：",
-		notificationTitle(comment.Platform), clampRunes(string(comment.Platform), 32), singleLine(comment.ResourceTitle, 200), singleLine(comment.ResourceURL, 1000), author)
 	suffix := "\n\n请引用回复本消息。回复内容将公开发布到对应平台。"
-	if footer != "" {
+	if footer := notificationFooter(comment.Platform); footer != "" {
 		suffix += "\n" + footer
 	}
-	remaining := maxNotificationRunes - utf8.RuneCountInString(prefix) - utf8.RuneCountInString(suffix)
-	return prefix + clampRunesWithin(comment.Text, remaining) + suffix
+	return formatNotification(comment, suffix)
 }
 
-func notificationTitle(platform commentbridge.Platform) string {
-	switch platform {
-	case commentbridge.PlatformBilibili:
-		return "🟦 哔哩哔哩新评论"
-	case commentbridge.PlatformYouTube:
-		return "📺 YouTube 新评论"
-	default:
-		return "💬 新评论"
-	}
+func formatNotification(comment commentbridge.Comment, suffix string) string {
+	prefix := fmt.Sprintf("💬 新评论\n视频：%s\n链接：%s\n作者：%s\n评论：",
+		singleLine(comment.ResourceTitle, 200), singleLine(comment.ResourceURL, 1000), notificationAuthor(comment))
+	remaining := maxNotificationRunes - utf8.RuneCountInString(prefix) - utf8.RuneCountInString(suffix)
+	return prefix + clampRunesWithin(comment.Text, remaining) + suffix
 }
 
 func notificationAuthor(comment commentbridge.Comment) string {

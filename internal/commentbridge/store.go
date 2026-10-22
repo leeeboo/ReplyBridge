@@ -32,6 +32,7 @@ type StatusCounts struct {
 	Engagements               map[JobStatus]int
 	EngagementFeedbacks       map[JobStatus]int
 	ManualEngagementFeedbacks map[JobStatus]int
+	Danmaku                   map[JobStatus]int
 }
 
 // TerminalJob identifies an operator-actionable job without exposing message text.
@@ -201,7 +202,7 @@ func (s *Store) migrate(ctx context.Context) error {
 CREATE TABLE IF NOT EXISTS sources (platform TEXT NOT NULL, account_id TEXT NOT NULL, initialized INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(platform,account_id));
 CREATE TABLE IF NOT EXISTS comments (platform TEXT NOT NULL, account_id TEXT NOT NULL, comment_id TEXT NOT NULL, root_id TEXT NOT NULL DEFAULT '', parent_id TEXT NOT NULL DEFAULT '', resource_id TEXT NOT NULL, resource_title TEXT NOT NULL, resource_url TEXT NOT NULL, author_id TEXT NOT NULL, author_name TEXT NOT NULL, text TEXT NOT NULL, published_at INTEGER NOT NULL, is_charge_plus INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(platform,account_id,comment_id));
 CREATE TABLE IF NOT EXISTS notification_jobs (action_id TEXT PRIMARY KEY, platform TEXT NOT NULL, account_id TEXT NOT NULL, comment_id TEXT NOT NULL, status TEXT NOT NULL, error_category TEXT NOT NULL DEFAULT '', external_id TEXT NOT NULL DEFAULT '', UNIQUE(platform,account_id,comment_id), FOREIGN KEY(platform,account_id,comment_id) REFERENCES comments(platform,account_id,comment_id));
-CREATE TABLE IF NOT EXISTS feishu_messages (message_id TEXT PRIMARY KEY, chat_id TEXT NOT NULL DEFAULT '', platform TEXT NOT NULL, account_id TEXT NOT NULL, comment_id TEXT NOT NULL, UNIQUE(platform,account_id,comment_id), FOREIGN KEY(platform,account_id,comment_id) REFERENCES comments(platform,account_id,comment_id));
+CREATE TABLE IF NOT EXISTS feishu_messages (message_id TEXT PRIMARY KEY, chat_id TEXT NOT NULL DEFAULT '', platform TEXT NOT NULL, account_id TEXT NOT NULL, comment_id TEXT NOT NULL, FOREIGN KEY(platform,account_id,comment_id) REFERENCES comments(platform,account_id,comment_id));
 CREATE TABLE IF NOT EXISTS inbox (message_id TEXT PRIMARY KEY, parent_message_id TEXT NOT NULL, root_message_id TEXT NOT NULL, chat_id TEXT NOT NULL, user_id TEXT NOT NULL, received_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS reply_jobs (action_id TEXT PRIMARY KEY, inbound_message_id TEXT NOT NULL UNIQUE, feishu_message_id TEXT NOT NULL, platform TEXT NOT NULL, account_id TEXT NOT NULL, comment_id TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL, error_category TEXT NOT NULL DEFAULT '', external_id TEXT NOT NULL DEFAULT '', FOREIGN KEY(inbound_message_id) REFERENCES inbox(message_id), FOREIGN KEY(platform,account_id,comment_id) REFERENCES comments(platform,account_id,comment_id));
 CREATE TABLE IF NOT EXISTS reaction_jobs (action_id TEXT PRIMARY KEY, inbound_message_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('read','ok')), message_id TEXT NOT NULL, emoji_type TEXT NOT NULL, status TEXT NOT NULL, error_category TEXT NOT NULL DEFAULT '', external_id TEXT NOT NULL DEFAULT '', UNIQUE(inbound_message_id,kind), FOREIGN KEY(inbound_message_id) REFERENCES inbox(message_id));
@@ -239,6 +240,9 @@ CREATE TABLE IF NOT EXISTS manual_engagement_feedback_jobs (
 		return err
 	}
 	if err := ensureColumn(s.db, "feishu_messages", "chat_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.migrateFeishuMessageMappings(ctx); err != nil {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `
@@ -316,6 +320,42 @@ CREATE TABLE IF NOT EXISTS credential_refresh_jobs (
 		}
 	}
 	return nil
+}
+
+func (s *Store) migrateFeishuMessageMappings(ctx context.Context) (result error) {
+	var uniqueIndexes int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_index_list('feishu_messages') WHERE origin='u'`).Scan(&uniqueIndexes); err != nil || uniqueIndexes == 0 {
+		return err
+	}
+	// Explicit resends retain every message mapping; notification_jobs still deduplicates discovery.
+	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
+		return err
+	}
+	defer func() {
+		_, err := s.db.ExecContext(context.WithoutCancel(ctx), `PRAGMA foreign_keys=ON`)
+		result = errors.Join(result, err)
+	}()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `
+CREATE TABLE feishu_messages_replacement (message_id TEXT PRIMARY KEY, chat_id TEXT NOT NULL DEFAULT '', platform TEXT NOT NULL, account_id TEXT NOT NULL, comment_id TEXT NOT NULL, FOREIGN KEY(platform,account_id,comment_id) REFERENCES comments(platform,account_id,comment_id));
+INSERT INTO feishu_messages_replacement SELECT message_id,chat_id,platform,account_id,comment_id FROM feishu_messages;
+DROP TABLE feishu_messages;
+ALTER TABLE feishu_messages_replacement RENAME TO feishu_messages;`)
+	if err != nil {
+		return err
+	}
+	var violations int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM pragma_foreign_key_check`).Scan(&violations); err != nil {
+		return err
+	}
+	if violations != 0 {
+		return errors.New("feishu message migration violates existing references")
+	}
+	return tx.Commit()
 }
 
 func ensureColumn(db *sql.DB, table, column, declaration string) error {
@@ -877,6 +917,19 @@ func (s *Store) ResetCredentialRefresh(ctx context.Context, actionID, quoteMessa
 func (s *Store) MarkNotificationSent(ctx context.Context, action, messageID, chatID string) error {
 	return s.finishNotification(ctx, action, JobSent, messageID, chatID)
 }
+
+// Webhooks return no message ID and must never authorize quoted replies or reactions.
+func (s *Store) MarkWebhookNotificationSent(ctx context.Context, action string) error {
+	r, err := s.db.ExecContext(ctx, `UPDATE notification_jobs SET status=?,external_id='',error_category='' WHERE action_id=? AND platform=? AND status=?`, JobSent, action, PlatformYouTube, JobSending)
+	if err != nil {
+		return err
+	}
+	if n, _ := r.RowsAffected(); n != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func (s *Store) MarkNotificationFailed(ctx context.Context, action string, status JobStatus, err error) error {
 	if status != JobFailed && status != JobUnknown {
 		return errors.New("invalid terminal notification status")
@@ -1436,6 +1489,17 @@ func (s *Store) StatusCounts(ctx context.Context) (StatusCounts, error) {
 			dst map[JobStatus]int
 		}{"SELECT status,COUNT(*) FROM manual_engagement_feedback_jobs GROUP BY status", out.ManualEngagementFeedbacks})
 	}
+	danmakuOutbox, err := s.tableExists(ctx, "danmaku_jobs")
+	if err != nil {
+		return StatusCounts{}, err
+	}
+	if danmakuOutbox {
+		out.Danmaku = map[JobStatus]int{}
+		queries = append(queries, struct {
+			sql string
+			dst map[JobStatus]int
+		}{"SELECT status,COUNT(*) FROM danmaku_jobs GROUP BY status", out.Danmaku})
+	}
 	for _, q := range queries {
 		rows, err := s.db.QueryContext(ctx, q.sql)
 		if err != nil {
@@ -1492,6 +1556,14 @@ func (s *Store) ListTerminalJobs(ctx context.Context, status JobStatus) ([]Termi
 	}
 	if manualOutbox {
 		queries = append(queries, "SELECT 'manual_engagement_feedback',action_id,status,platform,comment_id,message_id FROM manual_engagement_feedback_jobs WHERE status=?")
+		args = append(args, status)
+	}
+	danmakuOutbox, err := s.tableExists(ctx, "danmaku_jobs")
+	if err != nil {
+		return nil, err
+	}
+	if danmakuOutbox {
+		queries = append(queries, "SELECT 'danmaku',action_id,status,'bilibili','',external_id FROM danmaku_jobs WHERE status=?")
 		args = append(args, status)
 	}
 	rows, err := s.db.QueryContext(ctx, strings.Join(queries, " UNION ALL ")+" ORDER BY action_id", args...)

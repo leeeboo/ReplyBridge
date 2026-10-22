@@ -1,0 +1,11 @@
+services:
+  comment-bridge:
+    environment:
+      SHADOWBRAIN_DANMAKU_QUEUE_DIR: /run/shadowbrain/danmaku-queue
+    volumes:
+      - type: bind
+        source: ./danmaku-queue
+        target: /run/shadowbrain/danmaku-queue
+        read_only: false
+        bind:
+          create_host_path: false

@@ -1,0 +1,11 @@
+services:
+  comment-bridge:
+    environment:
+      SHADOWBRAIN_YOUTUBE_FEISHU_WEBHOOK_FILE: /run/shadowbrain/secrets/youtube-feishu-webhook
+    volumes:
+      - type: bind
+        source: ./secrets/youtube-feishu-webhook
+        target: /run/shadowbrain/secrets/youtube-feishu-webhook
+        read_only: true
+        bind:
+          create_host_path: false

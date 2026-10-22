@@ -24,6 +24,71 @@ func (f *fakeNotifier) NotifyComment(context.Context, Comment, string) (string, 
 type unknownErr struct{ error }
 
 func (unknownErr) OutcomeUnknown() bool { return true }
+
+func TestYouTubeWebhookRoutingAndDeduplication(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		err    error
+		status JobStatus
+	}{
+		{"sent", nil, JobSent},
+		{"unknown", unknownErr{errors.New("timeout")}, JobUnknown},
+		{"rejected", errors.New("rejected"), JobFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := testStore(t)
+			ctx := t.Context()
+			bot, webhook := &fakeNotifier{}, &fakeNotifier{err: tc.err}
+			b := Bridge{Store: s, Notifier: bot, YouTubeWebhook: webhook, TargetChatID: "chat-1"}
+			for _, platform := range []Platform{PlatformBilibili, PlatformYouTube} {
+				c := testComment()
+				c.Platform = platform
+				if err := s.RecordPoll(ctx, platform, "a", []Comment{c}); err != nil {
+					t.Fatal(err)
+				}
+				if err := b.NotifyOnce(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if (platform == PlatformBilibili && bot.calls != 0) || webhook.calls != 0 {
+					t.Fatal("baseline notified")
+				}
+				c.ID = "new"
+				if err := s.RecordPoll(ctx, platform, "a", []Comment{c}); err != nil {
+					t.Fatal(err)
+				}
+				if err := b.NotifyOnce(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if err := s.RecordPoll(ctx, platform, "a", []Comment{c}); err != nil {
+					t.Fatal(err)
+				}
+				if err := b.NotifyOnce(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if bot.calls != 1 || webhook.calls != 1 {
+				t.Fatalf("bot=%d webhook=%d", bot.calls, webhook.calls)
+			}
+			var status JobStatus
+			if err := s.DB().QueryRowContext(ctx, `SELECT status FROM notification_jobs WHERE platform=?`, PlatformYouTube).Scan(&status); err != nil || status != tc.status {
+				t.Fatalf("status=%s err=%v", status, err)
+			}
+			var mappings int
+			if err := s.DB().QueryRowContext(ctx, `SELECT count(*) FROM feishu_messages WHERE platform=?`, PlatformYouTube).Scan(&mappings); err != nil || mappings != 0 {
+				t.Fatalf("webhook mappings=%d err=%v", mappings, err)
+			}
+			ok, err := b.AcceptReply(ctx, IncomingReply{MessageID: "reply", ParentMessageID: "f1", ChatID: "chat-1", UserID: "user", Text: "reply"})
+			if err != nil || !ok {
+				t.Fatalf("bilibili quote mapping lost: %v", err)
+			}
+			var platform Platform
+			if err := s.DB().QueryRowContext(ctx, `SELECT platform FROM reply_jobs`).Scan(&platform); err != nil || platform != PlatformBilibili {
+				t.Fatalf("reply platform=%s err=%v", platform, err)
+			}
+		})
+	}
+}
+
 func TestNotifyUnknownIsNeverRetried(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

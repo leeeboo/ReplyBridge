@@ -17,10 +17,12 @@ compose.env
 *token*.json
 youtube-client.json
 feishu-app-secret
+youtube-feishu-webhook
 /shadowbrain-comment-bridge
 /secrets/
 /bilibili-auth/
 /backups/
 /staging/
+/danmaku-queue/
 /dist/
 .DS_Store

@@ -15,6 +15,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"comment-bridge/internal/commentbridge"
 )
 
 // Credential is an in-memory cookie collection. It is deliberately separate
@@ -438,7 +440,7 @@ func (c *Client) verifyCredential(ctx context.Context, credential Credential, ac
 	}
 	raw, err := temporary.Nav(ctx)
 	if err != nil {
-		return errors.New("bilibili QR login online verification failed")
+		return sanitizeQRLoginError(err, "bilibili QR login online verification failed")
 	}
 	var data struct {
 		IsLogin bool            `json:"isLogin"`
@@ -462,6 +464,9 @@ func (c *Client) followLoginURL(ctx context.Context, raw string) error {
 	req.Header.Set("Referer", "https://www.bilibili.com/")
 	response, err := c.http.Do(req)
 	if err != nil {
+		if errors.Is(err, commentbridge.ErrBilibiliRiskStopped) {
+			return commentbridge.ErrBilibiliRiskStopped
+		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -474,6 +479,9 @@ func (c *Client) followLoginURL(ctx context.Context, raw string) error {
 func sanitizeQRLoginError(err error, message string) error {
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, commentbridge.ErrBilibiliRiskStopped) {
+		return commentbridge.ErrBilibiliRiskStopped
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err

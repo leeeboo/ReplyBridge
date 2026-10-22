@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,6 +27,45 @@ func TestParseRunConfigFailsClosed(t *testing.T) {
 	}
 }
 
+func TestParseYouTubeWebhookSecretFile(t *testing.T) {
+	values := requiredFeishuEnv(writePrivateSecret(t, "secret"))
+	values["SHADOWBRAIN_YOUTUBE_ENABLED"] = "true"
+	values["SHADOWBRAIN_YOUTUBE_CHANNEL_ID"] = "channel"
+	values["SHADOWBRAIN_YOUTUBE_CLIENT_FILE"] = "client.json"
+	values["SHADOWBRAIN_YOUTUBE_TOKEN_FILE"] = "token.json"
+	if cfg, err := parseRunConfig(mapLookup(values)); err != nil || cfg.youtube.webhookURL != "" {
+		t.Fatal("legacy route changed")
+	}
+	for _, tc := range []struct {
+		name, content string
+		mode          os.FileMode
+		wantError     bool
+	}{
+		{"valid", "https://open.feishu.cn/open-apis/bot/v2/hook/test\n", 0600, false},
+		{"empty", " \n", 0600, true},
+		{"public", "https://open.feishu.cn/open-apis/bot/v2/hook/test", 0644, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writePrivateSecret(t, tc.content)
+			if err := os.Chmod(path, tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			values["SHADOWBRAIN_YOUTUBE_FEISHU_WEBHOOK_FILE"] = path
+			cfg, err := parseRunConfig(mapLookup(values))
+			if (err != nil) != tc.wantError {
+				t.Fatalf("error=%v", err)
+			}
+			if !tc.wantError && cfg.youtube.webhookURL != strings.TrimSpace(tc.content) {
+				t.Fatal("webhook not loaded")
+			}
+		})
+	}
+	values["SHADOWBRAIN_YOUTUBE_FEISHU_WEBHOOK_FILE"] = filepath.Join(t.TempDir(), "missing")
+	if _, err := parseRunConfig(mapLookup(values)); err == nil {
+		t.Fatal("missing webhook silently fell back")
+	}
+}
+
 func TestParseRunConfigBiliDoubleGate(t *testing.T) {
 	secret := writePrivateSecret(t, "secret")
 	values := requiredFeishuEnv(secret)
@@ -44,14 +84,71 @@ func TestParseRunConfigBiliDoubleGate(t *testing.T) {
 	}
 }
 
+func TestParseYouTubeReplyGroup(t *testing.T) {
+	values := requiredFeishuEnv(writePrivateSecret(t, "secret"))
+	values["SHADOWBRAIN_YOUTUBE_FEISHU_CHAT_ID"] = "youtube-chat"
+	if _, err := parseRunConfig(mapLookup(values)); err == nil {
+		t.Fatal("accepted YouTube group while platform disabled")
+	}
+	values["SHADOWBRAIN_YOUTUBE_ENABLED"] = "true"
+	values["SHADOWBRAIN_YOUTUBE_CHANNEL_ID"] = "channel"
+	values["SHADOWBRAIN_YOUTUBE_CLIENT_FILE"] = "client.json"
+	values["SHADOWBRAIN_YOUTUBE_TOKEN_FILE"] = "token.json"
+	cfg, err := parseRunConfig(mapLookup(values))
+	if err != nil || cfg.feishu.YouTubeChatID != "youtube-chat" || cfg.feishu.ChatID == "youtube-chat" {
+		t.Fatalf("YouTube group configuration: %v", err)
+	}
+	values["SHADOWBRAIN_YOUTUBE_FEISHU_WEBHOOK_FILE"] = writePrivateSecret(t, "https://open.feishu.cn/open-apis/bot/v2/hook/test")
+	if _, err := parseRunConfig(mapLookup(values)); err == nil {
+		t.Fatal("accepted both one-way and reply-capable YouTube routes")
+	}
+}
+
 func TestMakeBiliAdapterRejectsAccountOverrideMismatch(t *testing.T) {
+	store, err := commentbridge.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	send := func(context.Context, string, string) (string, error) { return "message", nil }
 	credential := writePrivateSecret(t, `{"SESSDATA":"session","bili_jct":"csrf","DedeUserID":"42"}`)
-	if _, err := makeBiliAdapter(biliConfig{credentialFile: credential, accountID: "99", subReplyPages: 10}); err == nil {
+	if _, err := makeBiliAdapter(biliConfig{credentialFile: credential, accountID: "99", subReplyPages: 10}, store, send); err == nil {
 		t.Fatal("Bilibili account override did not match Cookie but was accepted")
 	}
-	adapter, err := makeBiliAdapter(biliConfig{credentialFile: credential, accountID: "42", subReplyPages: 10})
+	adapter, err := makeBiliAdapter(biliConfig{credentialFile: credential, accountID: "42", subReplyPages: 10}, store, send)
 	if err != nil || adapter.AccountID() != "42" {
 		t.Fatalf("adapter account=%q err=%v", adapter.AccountID(), err)
+	}
+}
+
+func TestMakeBiliAdapterAlwaysUsesDurableRiskStop(t *testing.T) {
+	store, err := commentbridge.Open(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	send := func(context.Context, string, string) (string, error) { return "message", nil }
+	stop, err := commentbridge.NewBilibiliRiskStop(store, send)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = stop.BeginRequest(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	_ = stop.EndRequest(true, 429, 0)
+	cfg := biliConfig{credentialFile: writePrivateSecret(t, `{"SESSDATA":"session","bili_jct":"csrf","DedeUserID":"42"}`), subReplyPages: 10}
+	if _, err = makeBiliAdapter(cfg, nil, send); err == nil {
+		t.Fatal("accepted missing durable store")
+	}
+	adapter, err := makeBiliAdapter(cfg, store, send)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = adapter.ListRecent(t.Context()); !errors.Is(err, commentbridge.ErrBilibiliRiskStopped) {
+		t.Fatalf("factory omitted guard: %v", err)
+	}
+	if _, err = adapter.BeginCredentialRefresh(t.Context()); !errors.Is(err, commentbridge.ErrBilibiliRiskStopped) {
+		t.Fatalf("factory omitted QR guard: %v", err)
 	}
 }
 
@@ -233,7 +330,7 @@ func TestVersion(t *testing.T) {
 	if err := run(context.Background(), []string{"version"}, &out); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := out.String(), "shadowbrain-comment-bridge 0.1.13\n"; got != want {
+	if got, want := out.String(), "shadowbrain-comment-bridge 0.1.19\n"; got != want {
 		t.Fatalf("version = %q, want %q", got, want)
 	}
 }

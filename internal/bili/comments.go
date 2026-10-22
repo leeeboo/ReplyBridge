@@ -99,6 +99,9 @@ func (a *CommentAdapter) BeginCredentialRefresh(ctx context.Context) (commentbri
 	if a == nil || a.client == nil {
 		return commentbridge.CredentialRefreshSession{}, errors.New("bilibili credential refresh is unavailable")
 	}
+	if a.client.riskStopped() {
+		return commentbridge.CredentialRefreshSession{}, commentbridge.ErrBilibiliRiskStopped
+	}
 	if strings.TrimSpace(a.accountID) == "" {
 		return commentbridge.CredentialRefreshSession{}, errors.New("bilibili credential refresh has no account ID")
 	}
@@ -119,6 +122,9 @@ func (a *CommentAdapter) BeginCredentialRefresh(ctx context.Context) (commentbri
 func (a *CommentAdapter) PollCredentialRefresh(ctx context.Context, key string) (commentbridge.CredentialRefreshState, error) {
 	if a == nil || a.client == nil {
 		return credentialRefreshState(""), errors.New("bilibili credential refresh is unavailable")
+	}
+	if a.client.riskStopped() {
+		return credentialRefreshState(""), commentbridge.ErrBilibiliRiskStopped
 	}
 	if strings.TrimSpace(a.accountID) == "" {
 		return credentialRefreshState(""), errors.New("bilibili credential refresh has no account ID")
@@ -173,6 +179,9 @@ func credentialRefreshState(value string) commentbridge.CredentialRefreshState {
 func (a *CommentAdapter) ListRecent(ctx context.Context) (result []commentbridge.Comment, resultErr error) {
 	if a == nil || a.client == nil {
 		return nil, errors.New("bilibili comment adapter has no client")
+	}
+	if a.client.riskStopped() {
+		return nil, commentbridge.ErrBilibiliRiskStopped
 	}
 	if a.accountID == "" {
 		return nil, errors.New("bilibili comment adapter has no account ID")
@@ -647,6 +656,9 @@ func (a *CommentAdapter) Reply(ctx context.Context, comment commentbridge.Commen
 		(strings.TrimSpace(comment.AccountID) != "" && strings.TrimSpace(comment.AccountID) != a.accountID) {
 		return "", errors.New("bilibili reply target belongs to another account")
 	}
+	if a.client.riskStopped() {
+		return "", commentbridge.ErrBilibiliRiskStopped
+	}
 	if a.isRiskFused() {
 		return "", ErrCommentRiskControl
 	}
@@ -748,6 +760,9 @@ func (a *CommentAdapter) Engage(ctx context.Context, comment commentbridge.Comme
 		strings.TrimSpace(comment.AccountID) != a.accountID {
 		return "", errors.New("bilibili engagement target belongs to another account")
 	}
+	if a.client.riskStopped() {
+		return "", commentbridge.ErrBilibiliRiskStopped
+	}
 	if a.isRiskFused() {
 		return "", ErrCommentRiskControl
 	}
@@ -832,6 +847,9 @@ func (a *CommentAdapter) postCommentEngagementOnce(ctx context.Context, form url
 	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	response, err := hc.Do(req)
 	if err != nil {
+		if errors.Is(err, commentbridge.ErrBilibiliRiskStopped) {
+			return 0, nil, commentbridge.ErrBilibiliRiskStopped
+		}
 		return 0, nil, newReplyUnknownError("bilibili comment engagement outcome is unknown")
 	}
 	body, readErr := io.ReadAll(io.LimitReader(response.Body, 4<<20))
@@ -874,6 +892,9 @@ func (a *CommentAdapter) postReplyOnce(ctx context.Context, form url.Values, key
 	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	response, err := hc.Do(req)
 	if err != nil {
+		if errors.Is(err, commentbridge.ErrBilibiliRiskStopped) {
+			return 0, nil, commentbridge.ErrBilibiliRiskStopped
+		}
 		return 0, nil, newReplyUnknownError("bilibili reply request outcome is unknown")
 	}
 	body, readErr := io.ReadAll(io.LimitReader(response.Body, 4<<20))
@@ -939,6 +960,9 @@ func (a *CommentAdapter) isRiskFused() bool {
 // Only successful reads reopen a read-side fuse. Writes and authentication
 // failures still require human intervention; no failed write is retried here.
 func (a *CommentAdapter) finishReadAttempt(err error) {
+	if errors.Is(err, commentbridge.ErrBilibiliRiskStopped) {
+		return
+	}
 	a.riskMu.Lock()
 	defer a.riskMu.Unlock()
 	if err == nil {

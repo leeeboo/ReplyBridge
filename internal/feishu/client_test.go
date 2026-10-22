@@ -100,7 +100,7 @@ func TestNotifyComment(t *testing.T) {
 	if err := json.Unmarshal([]byte(fake.message.Content), &content); err != nil {
 		t.Fatalf("decode notification: %v", err)
 	}
-	want := "🟦 哔哩哔哩新评论\n平台：bilibili\n视频：视频\n链接：https://example.test/v\n作者：作者\n评论：评论\n\n请引用回复本消息。回复内容将公开发布到对应平台。\n给本消息添加 👍 可点赞评论；移除不会撤销。"
+	want := "💬 新评论\n视频：视频\n链接：https://example.test/v\n作者：作者\n评论：评论\n\n请引用回复本消息。回复内容将公开发布到对应平台。\n给本消息添加 👍 可点赞评论；移除不会撤销。"
 	if content.Text != want {
 		t.Fatalf("notification text = %q, want %q", content.Text, want)
 	}
@@ -108,7 +108,7 @@ func TestNotifyComment(t *testing.T) {
 
 func TestNotificationTextYouTubeFooter(t *testing.T) {
 	got := notificationText(commentbridge.Comment{Platform: commentbridge.PlatformYouTube, ResourceTitle: "视频", ResourceURL: "https://example.test/watch", AuthorName: "作者", Text: "评论"})
-	want := "📺 YouTube 新评论\n平台：youtube\n视频：视频\n链接：https://example.test/watch\n作者：作者\n评论：评论\n\n请引用回复本消息。回复内容将公开发布到对应平台。\n官方 API 不支持自动点赞，请打开链接手动操作。"
+	want := "💬 新评论\n视频：视频\n链接：https://example.test/watch\n作者：作者\n评论：评论\n\n请引用回复本消息。回复内容将公开发布到对应平台。\n官方 API 不支持自动点赞，请打开链接手动操作。"
 	if got != want {
 		t.Fatalf("notification text = %q, want %q", got, want)
 	}
@@ -129,17 +129,17 @@ func TestNotificationTextChargeMemberLabel(t *testing.T) {
 		{
 			name:    "bilibili charge member only",
 			comment: withPlatformAndCharge(base, commentbridge.PlatformBilibili, true),
-			want:    "🟦 哔哩哔哩新评论\n平台：bilibili\n视频：视频\n链接：https://example.test/watch\n作者：作者 ⚡充电会员\n评论：评论\n\n请引用回复本消息。回复内容将公开发布到对应平台。\n给本消息添加 👍 可点赞评论；移除不会撤销。",
+			want:    "💬 新评论\n视频：视频\n链接：https://example.test/watch\n作者：作者 ⚡充电会员\n评论：评论\n\n请引用回复本消息。回复内容将公开发布到对应平台。\n给本消息添加 👍 可点赞评论；移除不会撤销。",
 		},
 		{
 			name:    "bilibili non-member",
 			comment: withPlatformAndCharge(base, commentbridge.PlatformBilibili, false),
-			want:    "🟦 哔哩哔哩新评论\n平台：bilibili\n视频：视频\n链接：https://example.test/watch\n作者：作者\n评论：评论\n\n请引用回复本消息。回复内容将公开发布到对应平台。\n给本消息添加 👍 可点赞评论；移除不会撤销。",
+			want:    "💬 新评论\n视频：视频\n链接：https://example.test/watch\n作者：作者\n评论：评论\n\n请引用回复本消息。回复内容将公开发布到对应平台。\n给本消息添加 👍 可点赞评论；移除不会撤销。",
 		},
 		{
 			name:    "youtube",
 			comment: withPlatformAndCharge(base, commentbridge.PlatformYouTube, true),
-			want:    "📺 YouTube 新评论\n平台：youtube\n视频：视频\n链接：https://example.test/watch\n作者：作者\n评论：评论\n\n请引用回复本消息。回复内容将公开发布到对应平台。\n官方 API 不支持自动点赞，请打开链接手动操作。",
+			want:    "💬 新评论\n视频：视频\n链接：https://example.test/watch\n作者：作者\n评论：评论\n\n请引用回复本消息。回复内容将公开发布到对应平台。\n官方 API 不支持自动点赞，请打开链接手动操作。",
 		},
 	}
 	for _, tt := range tests {

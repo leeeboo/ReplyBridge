@@ -25,6 +25,76 @@ func testStore(t *testing.T) *Store {
 func testComment() Comment {
 	return Comment{Platform: PlatformBilibili, AccountID: "a", ID: "c", RootID: "root", ParentID: "parent", Text: "comment", IsChargePlus: true}
 }
+
+func TestMessageMappingMigrationPreservesReferencesAndReplyIsolation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.Exec(`
+CREATE TABLE comments (platform TEXT NOT NULL, account_id TEXT NOT NULL, comment_id TEXT NOT NULL, root_id TEXT NOT NULL DEFAULT '', parent_id TEXT NOT NULL DEFAULT '', resource_id TEXT NOT NULL, resource_title TEXT NOT NULL, resource_url TEXT NOT NULL, author_id TEXT NOT NULL, author_name TEXT NOT NULL, text TEXT NOT NULL, published_at INTEGER NOT NULL, PRIMARY KEY(platform,account_id,comment_id));
+CREATE TABLE feishu_messages (message_id TEXT PRIMARY KEY, chat_id TEXT NOT NULL DEFAULT '', platform TEXT NOT NULL, account_id TEXT NOT NULL, comment_id TEXT NOT NULL, UNIQUE(platform,account_id,comment_id), FOREIGN KEY(platform,account_id,comment_id) REFERENCES comments(platform,account_id,comment_id));
+CREATE TABLE preserved_reference (message_id TEXT REFERENCES feishu_messages(message_id));
+INSERT INTO comments VALUES('youtube','account','comment','comment','','video','title','url','author','viewer','text',1);
+INSERT INTO feishu_messages VALUES('old-message','old-chat','youtube','account','comment');
+INSERT INTO preserved_reference VALUES('old-message');`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { store.Close() }()
+	if _, err := store.DB().Exec(`INSERT INTO feishu_messages VALUES('new-message','new-chat','youtube','account','comment')`); err != nil {
+		t.Fatal(err)
+	}
+	var enabled, violations, retained int
+	if err := store.DB().QueryRow(`PRAGMA foreign_keys`).Scan(&enabled); err != nil || enabled != 1 {
+		t.Fatalf("foreign keys not restored: %d %v", enabled, err)
+	}
+	if err := store.DB().QueryRow(`SELECT count(*) FROM pragma_foreign_key_check`).Scan(&violations); err != nil || violations != 0 {
+		t.Fatalf("reference integrity: %d %v", violations, err)
+	}
+	if err := store.DB().QueryRow(`SELECT count(*) FROM preserved_reference JOIN feishu_messages USING(message_id)`).Scan(&retained); err != nil || retained != 1 {
+		t.Fatalf("old reference lost: %d %v", retained, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"old", "new"} {
+		in := IncomingReply{MessageID: name + "-reply", ParentMessageID: name + "-message", ChatID: name + "-chat", UserID: "member", Text: "reply"}
+		if added, err := store.AcceptReply(t.Context(), in); err != nil || !added {
+			t.Fatalf("%s mapping unavailable: %v", name, err)
+		}
+		if added, err := store.AcceptReply(t.Context(), in); err != nil || added {
+			t.Fatalf("reply replay: %v", err)
+		}
+		in.MessageID += "-wrong-group"
+		in.ChatID = "unrelated"
+		if added, err := store.AcceptReply(t.Context(), in); !errors.Is(err, ErrUnmappedReply) || added {
+			t.Fatalf("cross-group mapping accepted: %v", err)
+		}
+	}
+	_, err = store.DB().Exec(`INSERT INTO notification_jobs(action_id,platform,account_id,comment_id,status) VALUES('one','youtube','account','comment','sent')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`INSERT INTO notification_jobs(action_id,platform,account_id,comment_id,status) VALUES('two','youtube','account','comment','pending')`); err == nil {
+		t.Fatal("normal notification deduplication was removed")
+	}
+}
 func TestRecordPollBaselineAndClaim(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

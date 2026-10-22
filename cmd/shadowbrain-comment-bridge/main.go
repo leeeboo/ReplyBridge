@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"comment-bridge/internal/bili"
+	"comment-bridge/internal/codexreview"
 	"comment-bridge/internal/commentbridge"
 	"comment-bridge/internal/envfile"
 	"comment-bridge/internal/feishu"
@@ -27,7 +28,7 @@ import (
 )
 
 const (
-	version                 = "0.1.13"
+	version                 = "0.1.19"
 	defaultDB               = "comment-bridge.db"
 	biliRiskAcknowledgement = "I_UNDERSTAND_BILIBILI_WEB_API_ACCOUNT_RISK"
 	maxSecretBytes          = 1 << 20
@@ -45,6 +46,7 @@ type runConfig struct {
 	feishu       feishu.Config
 	youtube      youtubeConfig
 	bilibili     biliConfig
+	danmakuQueue string
 }
 
 type youtubeConfig struct {
@@ -54,6 +56,7 @@ type youtubeConfig struct {
 	clientFile string
 	tokenFile  string
 	maxPages   int
+	webhookURL string
 }
 
 type biliConfig struct {
@@ -86,6 +89,8 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	switch args[0] {
 	case "run":
 		return runBridge(ctx, args[1:])
+	case "review-danmaku":
+		return runDanmakuWorker(ctx, args[1:])
 	case "auth":
 		return runAuth(ctx, args[1:], stdout)
 	case "discover-feishu":
@@ -112,6 +117,7 @@ func printUsage(w io.Writer) {
 
 用法：
   shadowbrain-comment-bridge run [--db PATH]
+  shadowbrain-comment-bridge review-danmaku --queue-dir PATH --codex-bin PATH
   shadowbrain-comment-bridge auth youtube --client-file PATH --token-file PATH
   shadowbrain-comment-bridge discover-feishu --app-id ID --secret-file PATH
   shadowbrain-comment-bridge discover-youtube --client-file PATH --token-file PATH
@@ -248,8 +254,16 @@ func runBridge(ctx context.Context, args []string) (runErr error) {
 		Refreshers:              map[commentbridge.Platform]commentbridge.CredentialRefresher{},
 		QRNotifier:              bot,
 		TargetChatID:            cfg.feishu.ChatID,
+		YouTubeTargetChatID:     cfg.feishu.YouTubeChatID,
 	}
+	var danmaku *commentbridge.DanmakuMonitor
 	if cfg.youtube.enabled {
+		if cfg.youtube.webhookURL != "" {
+			bridge.YouTubeWebhook, err = feishu.NewWebhookNotifier(cfg.youtube.webhookURL)
+			if err != nil {
+				return errors.New("YouTube 飞书 Webhook 配置无效")
+			}
+		}
 		client, e := makeYouTubeClient(cfg.youtube)
 		if e != nil {
 			return e
@@ -261,7 +275,7 @@ func runBridge(ctx context.Context, args []string) (runErr error) {
 		bridge.Repliers[client.Platform()] = client
 	}
 	if cfg.bilibili.enabled {
-		adapter, e := makeBiliAdapter(cfg.bilibili)
+		adapter, e := makeBiliAdapter(cfg.bilibili, store, bot.SendErrorAlert)
 		if e != nil {
 			return e
 		}
@@ -270,6 +284,16 @@ func runBridge(ctx context.Context, args []string) (runErr error) {
 		bridge.Engagers[adapter.Platform()] = adapter
 		bridge.Refreshers[adapter.Platform()] = adapter
 		adapter.OnSkippedThread = func() { alerts.Observe(ctx, "bilibili_thread", errors.New("thread unavailable")) }
+		if cfg.danmakuQueue != "" {
+			queue, err := codexreview.NewQueue(cfg.danmakuQueue)
+			if err != nil {
+				return errors.New("弹幕分析队列目录无效")
+			}
+			danmaku, err = commentbridge.NewDanmakuMonitor(store, adapter.AccountID(), adapter.ListRecentDanmaku, queue, bot.NotifyDanmaku)
+			if err != nil {
+				return errors.New("无法初始化弹幕监测")
+			}
+		}
 	}
 	if len(bridge.Sources) == 0 {
 		return errors.New("至少必须启用一个评论平台")
@@ -284,6 +308,13 @@ func runBridge(ctx context.Context, args []string) (runErr error) {
 		alerts.Observe(ctx, "poll", err)
 	}
 	alerts.Observe(ctx, "startup", nil)
+	var danmakuTick <-chan time.Time
+	if danmaku != nil {
+		alerts.Observe(ctx, "danmaku_poll", danmaku.PollOnce(ctx))
+		ticker := time.NewTicker(commentbridge.DanmakuInterval)
+		defer ticker.Stop()
+		danmakuTick = ticker.C
+	}
 
 	// Run is isolated by the Feishu wrapper. Its failure is always handled as a
 	// safe category: SDK errors may include responses or request details.
@@ -315,11 +346,16 @@ func runBridge(ctx context.Context, args []string) (runErr error) {
 		case <-pollTimer.C:
 			runWork("poll", bridge.PollOnce)
 			pollTimer.Reset(nextCommentPollDelay(time.Now(), cfg.pollInterval))
+		case <-danmakuTick:
+			runWork("danmaku_poll", danmaku.PollOnce)
 		case <-workTicker.C:
 			runWork("credential_alert", bridge.CredentialAlertOnce)
 			runWork("credential_refresh", bridge.CredentialRefreshOnce)
 			runWork("reaction", bridge.ReactionOnce)
 			runWork("engagement_feedback", bridge.EngagementFeedbackOnce)
+			if danmaku != nil {
+				runWork("danmaku", danmaku.WorkOnce)
+			}
 			runWork("notification", bridge.NotifyOnce)
 			runWork("reply", bridge.ReplyOnce)
 			runWork("engagement", bridge.EngagementOnce)
@@ -411,10 +447,14 @@ func parseRunConfig(lookup func(string) (string, bool)) (runConfig, error) {
 		pollInterval: poll,
 		workInterval: work,
 		feishu: feishu.Config{
-			AppID: value("SHADOWBRAIN_FEISHU_APP_ID"), AppSecret: "", ChatID: value("SHADOWBRAIN_FEISHU_CHAT_ID"), AllowedOpenIDs: allowed, AllowAllGroupMembers: allowAllGroupMembers,
+			AppID: value("SHADOWBRAIN_FEISHU_APP_ID"), AppSecret: "", ChatID: value("SHADOWBRAIN_FEISHU_CHAT_ID"), YouTubeChatID: value("SHADOWBRAIN_YOUTUBE_FEISHU_CHAT_ID"), AllowedOpenIDs: allowed, AllowAllGroupMembers: allowAllGroupMembers,
 		},
-		youtube:  youtubeConfig{enabled: youtubeEnabled, channelID: value("SHADOWBRAIN_YOUTUBE_CHANNEL_ID"), accountID: value("SHADOWBRAIN_YOUTUBE_ACCOUNT_ID"), clientFile: value("SHADOWBRAIN_YOUTUBE_CLIENT_FILE"), tokenFile: value("SHADOWBRAIN_YOUTUBE_TOKEN_FILE"), maxPages: maxPages},
-		bilibili: biliConfig{enabled: biliEnabled, credentialFile: value("SHADOWBRAIN_BILIBILI_CREDENTIAL_FILE"), accountID: value("SHADOWBRAIN_BILIBILI_ACCOUNT_ID"), subReplyPages: biliSubReplyPages},
+		youtube:      youtubeConfig{enabled: youtubeEnabled, channelID: value("SHADOWBRAIN_YOUTUBE_CHANNEL_ID"), accountID: value("SHADOWBRAIN_YOUTUBE_ACCOUNT_ID"), clientFile: value("SHADOWBRAIN_YOUTUBE_CLIENT_FILE"), tokenFile: value("SHADOWBRAIN_YOUTUBE_TOKEN_FILE"), maxPages: maxPages},
+		bilibili:     biliConfig{enabled: biliEnabled, credentialFile: value("SHADOWBRAIN_BILIBILI_CREDENTIAL_FILE"), accountID: value("SHADOWBRAIN_BILIBILI_ACCOUNT_ID"), subReplyPages: biliSubReplyPages},
+		danmakuQueue: value("SHADOWBRAIN_DANMAKU_QUEUE_DIR"),
+	}
+	if cfg.danmakuQueue != "" && !biliEnabled {
+		return runConfig{}, errors.New("弹幕监测需要启用 Bilibili")
 	}
 	secretPath := value("SHADOWBRAIN_FEISHU_APP_SECRET_FILE")
 	if cfg.feishu.AppID == "" || secretPath == "" || cfg.feishu.ChatID == "" {
@@ -437,6 +477,20 @@ func parseRunConfig(lookup func(string) (string, bool)) (runConfig, error) {
 	}
 	if youtubeEnabled && (cfg.youtube.channelID == "" || cfg.youtube.clientFile == "" || cfg.youtube.tokenFile == "") {
 		return runConfig{}, errors.New("YouTube 配置不完整")
+	}
+	if path := value("SHADOWBRAIN_YOUTUBE_FEISHU_WEBHOOK_FILE"); path != "" && youtubeEnabled {
+		secret, err := load0600Secret(path)
+		if err != nil {
+			return runConfig{}, errors.New("YouTube 飞书 Webhook 文件无效")
+		}
+		cfg.youtube.webhookURL = strings.TrimSpace(string(secret))
+		clearBytes(secret)
+		if cfg.youtube.webhookURL == "" {
+			return runConfig{}, errors.New("YouTube 飞书 Webhook 文件为空")
+		}
+	}
+	if cfg.feishu.YouTubeChatID != "" && (!youtubeEnabled || cfg.youtube.webhookURL != "") {
+		return runConfig{}, errors.New("YouTube 独立回复群需要启用 YouTube，且不能同时配置 Webhook")
 	}
 	if !youtubeEnabled && !biliEnabled {
 		return runConfig{}, errors.New("至少必须启用一个评论平台")
@@ -549,7 +603,7 @@ func makeYouTubeClient(cfg youtubeConfig) (*youtube.Client, error) {
 	return client, nil
 }
 
-func makeBiliAdapter(cfg biliConfig) (*bili.CommentAdapter, error) {
+func makeBiliAdapter(cfg biliConfig, store *commentbridge.Store, send func(context.Context, string, string) (string, error)) (*bili.CommentAdapter, error) {
 	path := cfg.credentialFile
 	if path == "" {
 		var err error
@@ -567,7 +621,11 @@ func makeBiliAdapter(cfg biliConfig) (*bili.CommentAdapter, error) {
 		return nil, errors.New("Bilibili 账号 ID 与 Cookie 不匹配")
 	}
 	accountID := cookieAccountID
-	client, err := bili.NewClient(bili.Config{})
+	stop, err := commentbridge.NewBilibiliRiskStop(store, send)
+	if err != nil {
+		return nil, errors.New("无法初始化 B 站风控停用状态")
+	}
+	client, err := bili.NewClient(bili.Config{RiskStop: stop})
 	if err != nil {
 		return nil, errors.New("Bilibili 客户端配置无效")
 	}
@@ -636,6 +694,13 @@ func runStatus(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return errors.New("无法读取评论桥接状态")
 	}
+	riskStatus, err := store.BilibiliRiskStatus(ctx)
+	if err != nil {
+		return err
+	}
+	if riskStatus != "" {
+		fmt.Fprintln(stdout, riskStatus)
+	}
 	printCounts(stdout, "notifications", counts.Notifications)
 	printCounts(stdout, "credential-alerts", counts.CredentialAlerts)
 	printCounts(stdout, "credential-refreshes", counts.CredentialRefreshes)
@@ -643,6 +708,11 @@ func runStatus(ctx context.Context, args []string, stdout io.Writer) error {
 	printCounts(stdout, "engagements", counts.Engagements)
 	printCounts(stdout, "reactions", counts.Reactions)
 	printCounts(stdout, "manual-engagement-feedbacks", counts.ManualEngagementFeedbacks)
+	if counts.Danmaku != nil {
+		for _, status := range []commentbridge.JobStatus{"pending", "sending", "succeeded", "unknown", "failed"} {
+			fmt.Fprintf(stdout, "danmaku %s=%d\n", status, counts.Danmaku[status])
+		}
+	}
 	for _, status := range []commentbridge.JobStatus{commentbridge.JobUnknown, commentbridge.JobFailed} {
 		jobs, err := store.ListTerminalJobs(ctx, status)
 		if err != nil {

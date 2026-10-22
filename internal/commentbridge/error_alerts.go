@@ -27,6 +27,7 @@ var errorLabels = map[string]string{
 	"manual_engagement_feedback": "手动点赞提示", "credential_alert": "登录失效提醒",
 	"credential_refresh": "二维码登录", "connection": "飞书长连接", "event": "飞书消息处理",
 	"startup": "服务启动或运行", "storage": "告警状态存储", "bilibili_thread": "B 站失效评论已跳过",
+	"danmaku_poll": "弹幕抓取", "danmaku": "弹幕 AI 分析或提醒",
 }
 
 func NewErrorAlerts(s *Store, send func(context.Context, string, string) (string, error)) (*ErrorAlerts, error) {
@@ -44,7 +45,7 @@ func NewErrorAlerts(s *Store, send func(context.Context, string, string) (string
 
 // Observe receives fixed categories only. Upstream error text never enters an alert.
 func (a *ErrorAlerts) Observe(ctx context.Context, category string, issue error) {
-	if a == nil || errorLabels[category] == "" || errors.Is(issue, context.Canceled) {
+	if a == nil || errorLabels[category] == "" || errors.Is(issue, context.Canceled) || errors.Is(issue, ErrBilibiliRiskStopped) {
 		return
 	}
 	var err error
@@ -77,7 +78,13 @@ func (a *ErrorAlerts) storageFailure(ctx context.Context) {
 // Failed workers often return nil after persisting failed/unknown. Observe those
 // durable outcomes too, once per action and status, without replaying the action.
 func (a *ErrorAlerts) scanJobs(ctx context.Context) error {
-	for _, kind := range []string{"notification", "reply", "reaction", "engagement", "engagement_feedback", "manual_engagement_feedback", "credential_alert", "credential_refresh"} {
+	kinds := []string{"notification", "reply", "reaction", "engagement", "engagement_feedback", "manual_engagement_feedback", "credential_alert", "credential_refresh"}
+	if exists, err := a.store.tableExists(ctx, "danmaku_jobs"); err != nil {
+		return err
+	} else if exists {
+		kinds = append(kinds, "danmaku")
+	}
+	for _, kind := range kinds {
 		tx, err := a.store.db.BeginTx(ctx, nil)
 		if err != nil {
 			return err

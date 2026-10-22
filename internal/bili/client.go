@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"comment-bridge/internal/commentbridge"
 )
 
 const defaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
@@ -21,6 +23,7 @@ const defaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleW
 // Config is intentionally small. Supply BaseURL (and a disabled Gate) when
 // testing with httptest; production defaults target the public web API.
 type Config struct {
+	RiskStop    *commentbridge.BilibiliRiskStop
 	HTTPClient  *http.Client
 	BaseURL     string
 	PassportURL string
@@ -70,9 +73,16 @@ func NewClient(cfg Config) (*Client, error) {
 	if err != nil || passport.Scheme == "" || passport.Host == "" {
 		return nil, fmt.Errorf("invalid Bilibili passport URL")
 	}
-	hc := cfg.HTTPClient
-	if hc == nil {
-		hc = &http.Client{Timeout: 20 * time.Second}
+	hc := &http.Client{Timeout: 20 * time.Second}
+	if cfg.HTTPClient != nil {
+		*hc = *cfg.HTTPClient
+	}
+	if cfg.RiskStop != nil {
+		base := hc.Transport
+		if base == nil {
+			base = http.DefaultTransport
+		}
+		hc.Transport = &riskTransport{base: base, stop: cfg.RiskStop}
 	}
 	if hc.Jar == nil {
 		jar, err := cookiejar.New(nil)
@@ -190,6 +200,9 @@ func (c *Client) requestURL(ctx context.Context, rawURL string) ([]byte, *http.R
 		req.Header.Set("Referer", "https://www.bilibili.com/")
 		response, err := c.http.Do(req)
 		if err != nil {
+			if errors.Is(err, commentbridge.ErrBilibiliRiskStopped) {
+				return nil, nil, commentbridge.ErrBilibiliRiskStopped
+			}
 			if ctx.Err() != nil {
 				return nil, nil, ctx.Err()
 			}

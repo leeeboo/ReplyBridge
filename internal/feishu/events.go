@@ -65,13 +65,17 @@ type EventSink interface {
 	commentbridge.EngagementSink
 }
 
+func (c *Client) acceptsChat(chatID string) bool {
+	return chatID != "" && (chatID == c.config.ChatID || chatID == c.config.YouTubeChatID)
+}
+
 // HandleMessage validates and normalizes one SDK message-receive event.
 func (c *Client) HandleMessage(ctx context.Context, event *larkim.P2MessageReceiveV1, sink commentbridge.ReplySink) error {
 	if event == nil || event.Event == nil || event.Event.Message == nil || event.Event.Sender == nil || sink == nil {
 		return nil
 	}
 	m, sender := event.Event.Message, event.Event.Sender
-	if value(sender.SenderType) != "user" || value(m.ChatType) != "group" || value(m.ChatId) != c.config.ChatID || value(m.MessageType) != "text" {
+	if value(sender.SenderType) != "user" || value(m.ChatType) != "group" || !c.acceptsChat(value(m.ChatId)) || value(m.MessageType) != "text" {
 		return nil
 	}
 	if value(m.MessageId) == "" || value(m.ParentId) == "" || sender.SenderId == nil {
@@ -117,14 +121,24 @@ func (c *Client) HandleReactionCreated(ctx context.Context, event *larkim.P2Mess
 			return nil
 		}
 	}
-	_, err := sink.AcceptEngagement(ctx, commentbridge.IncomingEngagement{
-		EventID: eventID, MessageID: messageID, UserID: openID, ExpectedChatID: c.config.ChatID,
-		ReactionType: "THUMBSUP", EmojiType: "THUMBSUP", ReceivedAt: eventTime(value(e.ActionTime)),
-	})
-	if errors.Is(err, commentbridge.ErrUnmappedEngagement) || errors.Is(err, commentbridge.ErrUnsupportedEngagement) || errors.Is(err, commentbridge.ErrInvalidEngagement) {
-		return nil
+	chatIDs := []string{c.config.ChatID}
+	if c.config.YouTubeChatID != "" && c.config.YouTubeChatID != c.config.ChatID {
+		chatIDs = append(chatIDs, c.config.YouTubeChatID)
 	}
-	return err
+	for _, chatID := range chatIDs {
+		_, err := sink.AcceptEngagement(ctx, commentbridge.IncomingEngagement{
+			EventID: eventID, MessageID: messageID, UserID: openID, ExpectedChatID: chatID,
+			ReactionType: "THUMBSUP", EmojiType: "THUMBSUP", ReceivedAt: eventTime(value(e.ActionTime)),
+		})
+		if errors.Is(err, commentbridge.ErrUnmappedEngagement) {
+			continue
+		}
+		if errors.Is(err, commentbridge.ErrUnsupportedEngagement) || errors.Is(err, commentbridge.ErrInvalidEngagement) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 var mention = regexp.MustCompile(`<at\b[^>]*>.*?</at>`)
