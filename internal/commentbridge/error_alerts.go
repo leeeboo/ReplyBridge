@@ -27,6 +27,7 @@ var errorLabels = map[string]string{
 	"manual_engagement_feedback": "手动点赞提示", "credential_alert": "登录失效提醒",
 	"credential_refresh": "二维码登录", "connection": "飞书长连接", "event": "飞书消息处理",
 	"startup": "服务启动或运行", "storage": "告警状态存储", "bilibili_thread": "B 站失效评论已跳过",
+	"moderation": "删除评论或拉黑", "bot_command": "机器人帮助与确认提示",
 	"danmaku_poll": "弹幕抓取", "danmaku": "弹幕 AI 分析或提醒",
 }
 
@@ -78,7 +79,7 @@ func (a *ErrorAlerts) storageFailure(ctx context.Context) {
 // Failed workers often return nil after persisting failed/unknown. Observe those
 // durable outcomes too, once per action and status, without replaying the action.
 func (a *ErrorAlerts) scanJobs(ctx context.Context) error {
-	kinds := []string{"notification", "reply", "reaction", "engagement", "engagement_feedback", "manual_engagement_feedback", "credential_alert", "credential_refresh"}
+	kinds := []string{"notification", "reply", "reaction", "engagement", "engagement_feedback", "manual_engagement_feedback", "credential_alert", "credential_refresh", "moderation", "bot_command"}
 	if exists, err := a.store.tableExists(ctx, "danmaku_jobs"); err != nil {
 		return err
 	} else if exists {

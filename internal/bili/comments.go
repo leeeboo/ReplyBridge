@@ -775,7 +775,7 @@ func (a *CommentAdapter) Engage(ctx context.Context, comment commentbridge.Comme
 	if credential.Cookies["SESSDATA"] == "" || csrf == "" {
 		return "", errors.New("bilibili engagement requires SESSDATA and bili_jct")
 	}
-	status, body, err := a.postCommentEngagementOnce(ctx, url.Values{
+	status, body, err := a.postCommentActionOnce(ctx, "/x/v2/reply/action", url.Values{
 		"oid":        {oid},
 		"type":       {"1"},
 		"rpid":       {rpid},
@@ -786,6 +786,10 @@ func (a *CommentAdapter) Engage(ctx context.Context, comment commentbridge.Comme
 	if err != nil {
 		return "", err
 	}
+	return a.commentActionResult(status, body, rpid)
+}
+
+func (a *CommentAdapter) commentActionResult(status int, body []byte, targetID string) (string, error) {
 	if status >= http.StatusMultipleChoices && status < http.StatusBadRequest || status >= http.StatusInternalServerError {
 		return "", newReplyUnknownError("bilibili comment engagement outcome is unknown")
 	}
@@ -804,9 +808,8 @@ func (a *CommentAdapter) Engage(ctx context.Context, comment commentbridge.Comme
 	}
 	switch *envelope.Code {
 	case 0:
-		// The action response does not have a durable action ID. The comment ID
-		// is stable and identifies the sole resource that was engaged.
-		return rpid, nil
+		// These APIs return no action ID; retain the exact comment or author target.
+		return targetID, nil
 	case -101, -111:
 		a.tripRiskFuse()
 		return "", credentialInvalidError(*envelope.Code)
@@ -825,12 +828,12 @@ func (a *CommentAdapter) Engage(ctx context.Context, comment commentbridge.Comme
 	}
 }
 
-// postCommentEngagementOnce is intentionally separate from postReplyOnce so
+// postCommentActionOnce is intentionally separate from postReplyOnce so
 // a future change to reply signing cannot accidentally add WBI parameters or
 // retries to this write endpoint.
-func (a *CommentAdapter) postCommentEngagementOnce(ctx context.Context, form url.Values) (int, []byte, error) {
+func (a *CommentAdapter) postCommentActionOnce(ctx context.Context, path string, form url.Values) (int, []byte, error) {
 	endpoint := *a.client.base
-	endpoint.Path = strings.TrimRight(a.client.base.Path, "/") + "/x/v2/reply/action"
+	endpoint.Path = strings.TrimRight(a.client.base.Path, "/") + path
 	endpoint.RawQuery = ""
 	if err := a.client.gate.Wait(ctx); err != nil {
 		return 0, nil, err

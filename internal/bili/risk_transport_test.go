@@ -31,7 +31,7 @@ func riskTestClient(t *testing.T, endpoint string, stop *commentbridge.BilibiliR
 func riskRoutes(t *testing.T, c *Client) map[string]func() error {
 	t.Helper()
 	a := NewCommentAdapter(c, "1")
-	comment := commentbridge.Comment{Platform: commentbridge.PlatformBilibili, AccountID: "1", ResourceID: "2", ID: "3"}
+	comment := commentbridge.Comment{Platform: commentbridge.PlatformBilibili, AccountID: "1", ResourceID: "2", ID: "3", AuthorID: "4"}
 	return map[string]func() error{
 		"comments":       func() error { _, err := a.ListRecent(t.Context()); return err },
 		"child-replies":  func() error { return c.getJSON(t.Context(), "/x/v2/reply/reply", nil, false, nil) },
@@ -39,6 +39,8 @@ func riskRoutes(t *testing.T, c *Client) map[string]func() error {
 		"nav":            func() error { _, err := c.Nav(t.Context()); return err },
 		"reply":          func() error { _, err := a.Reply(t.Context(), comment, "reply"); return err },
 		"like":           func() error { _, err := a.Engage(t.Context(), comment, commentbridge.EngagementLike); return err },
+		"delete":         func() error { _, err := a.Moderate(t.Context(), comment, commentbridge.ModerationDelete); return err },
+		"ban":            func() error { _, err := a.Moderate(t.Context(), comment, commentbridge.ModerationBan); return err },
 		"qr-generate":    func() error { _, err := a.BeginCredentialRefresh(t.Context()); return err },
 		"qr-poll":        func() error { _, err := a.PollCredentialRefresh(t.Context(), "key"); return err },
 		"login-redirect": func() error { return c.followLoginURL(t.Context(), c.base.String()+"/callback") },
@@ -46,7 +48,7 @@ func riskRoutes(t *testing.T, c *Client) map[string]func() error {
 }
 
 func TestRiskStopCoversEveryRouteAndRestart(t *testing.T) {
-	for _, first := range []string{"comments", "child-replies", "danmaku", "nav", "reply", "like", "qr-generate", "qr-poll", "login-redirect"} {
+	for _, first := range []string{"comments", "child-replies", "danmaku", "nav", "reply", "like", "delete", "ban", "qr-generate", "qr-poll", "login-redirect"} {
 		t.Run(first, func(t *testing.T) {
 			var calls atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

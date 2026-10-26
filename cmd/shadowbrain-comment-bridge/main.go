@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	version                 = "0.1.19"
+	version                 = "0.1.20"
 	defaultDB               = "comment-bridge.db"
 	biliRiskAcknowledgement = "I_UNDERSTAND_BILIBILI_WEB_API_ACCOUNT_RISK"
 	maxSecretBytes          = 1 << 20
@@ -251,6 +251,7 @@ func runBridge(ctx context.Context, args []string) (runErr error) {
 		MessageReplier:          bot,
 		Repliers:                map[commentbridge.Platform]commentbridge.CommentReplier{},
 		Engagers:                map[commentbridge.Platform]commentbridge.CommentEngager{},
+		Moderators:              map[commentbridge.Platform]commentbridge.CommentModerator{},
 		Refreshers:              map[commentbridge.Platform]commentbridge.CredentialRefresher{},
 		QRNotifier:              bot,
 		TargetChatID:            cfg.feishu.ChatID,
@@ -273,6 +274,7 @@ func runBridge(ctx context.Context, args []string) (runErr error) {
 		}
 		bridge.Sources = append(bridge.Sources, client)
 		bridge.Repliers[client.Platform()] = client
+		bridge.Moderators[client.Platform()] = client
 	}
 	if cfg.bilibili.enabled {
 		adapter, e := makeBiliAdapter(cfg.bilibili, store, bot.SendErrorAlert)
@@ -282,6 +284,7 @@ func runBridge(ctx context.Context, args []string) (runErr error) {
 		bridge.Sources = append(bridge.Sources, adapter)
 		bridge.Repliers[adapter.Platform()] = adapter
 		bridge.Engagers[adapter.Platform()] = adapter
+		bridge.Moderators[adapter.Platform()] = adapter
 		bridge.Refreshers[adapter.Platform()] = adapter
 		adapter.OnSkippedThread = func() { alerts.Observe(ctx, "bilibili_thread", errors.New("thread unavailable")) }
 		if cfg.danmakuQueue != "" {
@@ -358,6 +361,8 @@ func runBridge(ctx context.Context, args []string) (runErr error) {
 			}
 			runWork("notification", bridge.NotifyOnce)
 			runWork("reply", bridge.ReplyOnce)
+			runWork("bot_command", bridge.BotCommandOnce)
+			runWork("moderation", bridge.ModerationOnce)
 			runWork("engagement", bridge.EngagementOnce)
 			runWork("manual_engagement_feedback", bridge.ManualEngagementFeedbackOnce)
 			runWork("reaction", bridge.ReactionOnce)
@@ -706,6 +711,8 @@ func runStatus(ctx context.Context, args []string, stdout io.Writer) error {
 	printCounts(stdout, "credential-refreshes", counts.CredentialRefreshes)
 	printCounts(stdout, "replies", counts.Replies)
 	printCounts(stdout, "engagements", counts.Engagements)
+	printCounts(stdout, "moderations", counts.Moderations)
+	printCounts(stdout, "bot-commands", counts.BotCommands)
 	printCounts(stdout, "reactions", counts.Reactions)
 	printCounts(stdout, "manual-engagement-feedbacks", counts.ManualEngagementFeedbacks)
 	if counts.Danmaku != nil {

@@ -19,6 +19,9 @@ import (
 
 // Start opens the official Feishu long connection and blocks while it runs.
 func (c *Client) Start(ctx context.Context, sink EventSink) error {
+	if err := c.loadBotIdentity(ctx); err != nil {
+		return err
+	}
 	d := c.Dispatcher(sink)
 	return ws.NewClient(c.config.AppID, c.config.AppSecret, ws.WithEventHandler(d), ws.WithLogLevel(larkcore.LogLevelWarn)).Start(ctx)
 }
@@ -27,6 +30,9 @@ func (c *Client) Start(ctx context.Context, sink EventSink) error {
 // Start method blocks forever even after Close, so Run isolates it in a
 // goroutine and lets the process shut down promptly after closing the socket.
 func (c *Client) Run(ctx context.Context, sink EventSink) error {
+	if err := c.loadBotIdentity(ctx); err != nil {
+		return err
+	}
 	d := c.Dispatcher(sink)
 	client := ws.NewClient(c.config.AppID, c.config.AppSecret, ws.WithEventHandler(d), ws.WithLogLevel(larkcore.LogLevelWarn))
 	errCh := make(chan error, 1)
@@ -78,7 +84,7 @@ func (c *Client) HandleMessage(ctx context.Context, event *larkim.P2MessageRecei
 	if value(sender.SenderType) != "user" || value(m.ChatType) != "group" || !c.acceptsChat(value(m.ChatId)) || value(m.MessageType) != "text" {
 		return nil
 	}
-	if value(m.MessageId) == "" || value(m.ParentId) == "" || sender.SenderId == nil {
+	if value(m.MessageId) == "" || sender.SenderId == nil {
 		return nil
 	}
 	openID := strings.TrimSpace(value(sender.SenderId.OpenId))
@@ -92,6 +98,16 @@ func (c *Client) HandleMessage(ctx context.Context, event *larkim.P2MessageRecei
 	}
 	text, ok := parseText(value(m.Content), m.Mentions)
 	if !ok || text == "" {
+		return nil
+	}
+	if (strings.EqualFold(text, "help") || text == "帮助") && c.mentionsSelf(m.Mentions) {
+		if help, ok := sink.(commentbridge.HelpSink); ok {
+			_, err := help.AcceptHelp(ctx, commentbridge.IncomingReply{MessageID: value(m.MessageId), ChatID: value(m.ChatId), UserID: openID, Text: text, ReceivedAt: eventTime(value(m.CreateTime))})
+			return err
+		}
+		return nil
+	}
+	if value(m.ParentId) == "" {
 		return nil
 	}
 	_, err := sink.AcceptReply(ctx, commentbridge.IncomingReply{
@@ -113,7 +129,7 @@ func (c *Client) HandleReactionCreated(ctx context.Context, event *larkim.P2Mess
 	eventID := strings.TrimSpace(event.EventV2Base.Header.EventID)
 	messageID := strings.TrimSpace(value(e.MessageId))
 	openID := strings.TrimSpace(value(e.UserId.OpenId))
-	if eventID == "" || messageID == "" || openID == "" || value(e.OperatorType) != "user" || value(e.ReactionType.EmojiType) != "THUMBSUP" {
+	if eventID == "" || messageID == "" || openID == "" || value(e.OperatorType) != "user" || !supportedReaction(value(e.ReactionType.EmojiType)) {
 		return nil
 	}
 	if !c.config.AllowAllGroupMembers {
@@ -128,7 +144,7 @@ func (c *Client) HandleReactionCreated(ctx context.Context, event *larkim.P2Mess
 	for _, chatID := range chatIDs {
 		_, err := sink.AcceptEngagement(ctx, commentbridge.IncomingEngagement{
 			EventID: eventID, MessageID: messageID, UserID: openID, ExpectedChatID: chatID,
-			ReactionType: "THUMBSUP", EmojiType: "THUMBSUP", ReceivedAt: eventTime(value(e.ActionTime)),
+			ReactionType: value(e.ReactionType.EmojiType), EmojiType: value(e.ReactionType.EmojiType), ReceivedAt: eventTime(value(e.ActionTime)),
 		})
 		if errors.Is(err, commentbridge.ErrUnmappedEngagement) {
 			continue
@@ -177,4 +193,44 @@ func value(v *string) string {
 		return ""
 	}
 	return *v
+}
+
+func supportedReaction(emoji string) bool {
+	return emoji == "THUMBSUP" || emoji == "ThumbsDown" || emoji == "MinusOne"
+}
+
+func (c *Client) mentionsSelf(mentions []*larkim.MentionEvent) bool {
+	if c.botOpenID == "" {
+		return false
+	}
+	for _, item := range mentions {
+		if item != nil && item.Id != nil && value(item.Id.OpenId) == c.botOpenID && value(item.Key) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Client) loadBotIdentity(ctx context.Context) error {
+	if c.botOpenID != "" {
+		return nil
+	}
+	if c.sdkClient == nil {
+		return errors.New("feishu bot identity unavailable")
+	}
+	resp, err := c.sdkClient.Get(ctx, "/open-apis/bot/v3/info", nil, larkcore.AccessTokenTypeTenant)
+	if err != nil || resp == nil || resp.StatusCode != 200 {
+		return errors.New("feishu bot identity request failed")
+	}
+	var result struct {
+		Code *int `json:"code"`
+		Bot  struct {
+			OpenID string `json:"open_id"`
+		} `json:"bot"`
+	}
+	if json.Unmarshal(resp.RawBody, &result) != nil || result.Code == nil || *result.Code != 0 || strings.TrimSpace(result.Bot.OpenID) == "" {
+		return errors.New("feishu bot identity response invalid")
+	}
+	c.botOpenID = result.Bot.OpenID
+	return nil
 }

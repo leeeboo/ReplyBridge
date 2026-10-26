@@ -330,7 +330,7 @@ func TestVersion(t *testing.T) {
 	if err := run(context.Background(), []string{"version"}, &out); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := out.String(), "shadowbrain-comment-bridge 0.1.19\n"; got != want {
+	if got, want := out.String(), "shadowbrain-comment-bridge 0.1.20\n"; got != want {
 		t.Fatalf("version = %q, want %q", got, want)
 	}
 }

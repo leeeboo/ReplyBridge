@@ -37,6 +37,8 @@ type Config struct {
 // Client sends notifications and receives approved quoted replies.
 type Client struct {
 	config       Config
+	sdkClient    *lark.Client
+	botOpenID    string
 	allowed      map[string]struct{}
 	sender       messageSender
 	images       imageTransport
@@ -254,6 +256,7 @@ func New(config Config) (*Client, error) {
 	sdkClient := lark.NewClient(config.AppID, config.AppSecret, lark.WithLogLevel(larkcore.LogLevelWarn))
 	return &Client{
 		config:    config,
+		sdkClient: sdkClient,
 		allowed:   allowed,
 		sender:    sdkSender{client: sdkClient},
 		images:    sdkImageTransport{client: sdkClient},

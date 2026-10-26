@@ -33,6 +33,8 @@ type StatusCounts struct {
 	EngagementFeedbacks       map[JobStatus]int
 	ManualEngagementFeedbacks map[JobStatus]int
 	Danmaku                   map[JobStatus]int
+	Moderations               map[JobStatus]int
+	BotCommands               map[JobStatus]int
 }
 
 // TerminalJob identifies an operator-actionable job without exposing message text.
@@ -81,6 +83,10 @@ func Open(path string) (*Store, error) {
 	}
 	s := &Store{db: db}
 	if err := s.migrate(context.Background()); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := s.migrateModeration(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -1405,6 +1411,16 @@ func terminalCategory(s JobStatus) string {
 	return ""
 }
 func (s *Store) RecoverSending(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO bot_command_jobs(action_id,parent_id,text)
+ SELECT 'moderation-interrupted-' || action_id,confirm_message_id,'⚠️ 操作期间服务中断，平台结果不确定，不会自动重试。请前往平台核对。'
+ FROM moderation_jobs WHERE status='sending'`); err != nil {
+		return err
+	}
+	for _, table := range []string{"moderation_jobs", "bot_command_jobs"} {
+		if _, err := s.db.ExecContext(ctx, "UPDATE "+table+" SET status='unknown',error_category='interrupted' WHERE status='sending'"); err != nil {
+			return err
+		}
+	}
 	_, e := s.db.ExecContext(ctx, "UPDATE notification_jobs SET status=?,error_category=? WHERE status=?", JobUnknown, "interrupted", JobSending)
 	if e != nil {
 		return e
@@ -1500,6 +1516,19 @@ func (s *Store) StatusCounts(ctx context.Context) (StatusCounts, error) {
 			dst map[JobStatus]int
 		}{"SELECT status,COUNT(*) FROM danmaku_jobs GROUP BY status", out.Danmaku})
 	}
+	out.Moderations, out.BotCommands = map[JobStatus]int{}, map[JobStatus]int{}
+	for table, dst := range map[string]map[JobStatus]int{"moderation_jobs": out.Moderations, "bot_command_jobs": out.BotCommands} {
+		exists, err := s.tableExists(ctx, table)
+		if err != nil {
+			return StatusCounts{}, err
+		}
+		if exists {
+			queries = append(queries, struct {
+				sql string
+				dst map[JobStatus]int
+			}{"SELECT status,COUNT(*) FROM " + table + " GROUP BY status", dst})
+		}
+	}
 	for _, q := range queries {
 		rows, err := s.db.QueryContext(ctx, q.sql)
 		if err != nil {
@@ -1534,6 +1563,20 @@ func (s *Store) ListTerminalJobs(ctx context.Context, status JobStatus) ([]Termi
 		"SELECT 'engagement_feedback',action_id,status,'','',message_id FROM engagement_feedback_jobs WHERE status=?",
 	}
 	args := []any{status, status, status, status, status}
+	for table, query := range map[string]string{
+		"moderation_jobs":  "SELECT 'moderation',m.action_id,m.status,r.platform,r.comment_id,m.confirm_message_id FROM moderation_jobs m JOIN moderation_requests r ON r.event_id=m.request_id WHERE m.status=?",
+		"bot_command_jobs": "SELECT 'bot_command',action_id,status,'','',external_id FROM bot_command_jobs WHERE status=?",
+	} {
+		exists, err := s.tableExists(ctx, table)
+		if err != nil {
+			return nil, err
+		}
+		if exists {
+			queries = append(queries, query)
+			args = append(args, status)
+		}
+	}
+
 	credentialOutbox, err := s.tableExists(ctx, "credential_alert_jobs")
 	if err != nil {
 		return nil, err

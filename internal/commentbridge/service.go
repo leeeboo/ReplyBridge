@@ -27,6 +27,7 @@ type Bridge struct {
 	// actions. It is deliberately separate from platform comment repliers.
 	MessageReplier MessageReplier
 	Engagers       map[Platform]CommentEngager
+	Moderators     map[Platform]CommentModerator
 	// TargetChatID is persisted with every successful notification so a
 	// reaction on a message from a previously configured group cannot approve
 	// a platform write after the service changes groups.
@@ -280,9 +281,18 @@ func (b *Bridge) NotifyOnce(ctx context.Context) error {
 	return nil
 }
 func (b *Bridge) AcceptReply(ctx context.Context, in IncomingReply) (bool, error) {
+	if handled, accepted, err := b.Store.acceptModerationConfirmation(ctx, in); handled || err != nil {
+		return accepted, err
+	}
 	return b.Store.AcceptReply(ctx, in)
 }
 func (b *Bridge) AcceptEngagement(ctx context.Context, in IncomingEngagement) (bool, error) {
+	if moderationKind(in.ReactionType) != "" {
+		if !b.acceptsCommandChat(in.ExpectedChatID) {
+			return false, ErrUnmappedEngagement
+		}
+		return b.Store.AcceptModeration(ctx, in)
+	}
 	return b.Store.AcceptEngagement(ctx, in)
 }
 func (b *Bridge) ReplyOnce(ctx context.Context) error {
