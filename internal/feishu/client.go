@@ -450,13 +450,32 @@ func (c *Client) ReplyToMessage(ctx context.Context, parentMessageID, text, acti
 	if strings.TrimSpace(actionID) == "" {
 		return "", errors.New("feishu reply action id is required")
 	}
-	content, err := json.Marshal(map[string]string{"text": text})
+	msgType := "text"
+	var payload any = map[string]string{"text": text}
+	if text == commentbridge.HelpText {
+		msgType = "post"
+		var rows [][]map[string]string
+		for line := range strings.SplitSeq(text, "\n") {
+			var row []map[string]string
+			for part := range strings.FieldsFuncSeq(line, func(r rune) bool { return r == '[' || r == ']' }) {
+				element := map[string]string{"tag": "text", "text": part}
+				switch part {
+				case "THUMBSUP", "ThumbsDown", "MinusOne", "HEART":
+					element = map[string]string{"tag": "emotion", "emoji_type": part}
+				}
+				row = append(row, element)
+			}
+			rows = append(rows, row)
+		}
+		payload = map[string]any{"zh_cn": map[string]any{"content": rows}}
+	}
+	content, err := json.Marshal(payload)
 	if err != nil {
 		return "", fmt.Errorf("encode feishu reply: %w", err)
 	}
 	messageID, definiteRejection, err := c.replies.Reply(ctx, outgoingReply{
 		ParentMessageID: parentMessageID,
-		MsgType:         "text",
+		MsgType:         msgType,
 		Content:         string(content),
 		UUID:            feishuUUID(actionID),
 	})

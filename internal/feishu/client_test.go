@@ -948,3 +948,46 @@ func newTestClient(t *testing.T) *Client {
 }
 
 func ptr(s string) *string { return &s }
+
+func TestReplyHelpUsesNativeFeishuEmoji(t *testing.T) {
+	client := newTestClient(t)
+	fake := &fakeReplyTransport{messageID: "om_help"}
+	client.replies = fake
+	if _, err := client.ReplyToMessage(t.Context(), "om_parent", commentbridge.HelpText, "help-action"); err != nil {
+		t.Fatal(err)
+	}
+	if fake.reply.MsgType != "post" || fake.reply.ParentMessageID != "om_parent" || fake.reply.UUID != "help-action" {
+		t.Fatalf("wrong help envelope: %+v", fake.reply)
+	}
+	var content struct {
+		ZhCN struct {
+			Content [][]map[string]string `json:"content"`
+		} `json:"zh_cn"`
+	}
+	if err := json.Unmarshal([]byte(fake.reply.Content), &content); err != nil {
+		t.Fatal(err)
+	}
+	var emoji []string
+	var rebuilt []string
+	for _, row := range content.ZhCN.Content {
+		var line strings.Builder
+		for _, element := range row {
+			switch element["tag"] {
+			case "text":
+				line.WriteString(element["text"])
+			case "emotion":
+				emoji = append(emoji, element["emoji_type"])
+				line.WriteString("[" + element["emoji_type"] + "]")
+			default:
+				t.Fatalf("unexpected help element: %+v", element)
+			}
+		}
+		rebuilt = append(rebuilt, line.String())
+	}
+	if strings.Join(emoji, ",") != "THUMBSUP,HEART,ThumbsDown,MinusOne" {
+		t.Fatalf("wrong native emoji: %v", emoji)
+	}
+	if strings.Join(rebuilt, "\n") != commentbridge.HelpText {
+		t.Fatal("help wording or line breaks changed")
+	}
+}
