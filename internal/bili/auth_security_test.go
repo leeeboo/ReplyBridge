@@ -53,3 +53,19 @@ func TestLoadCredentialFileRejectsUnsafeFiles(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadBilibiliCLIExport(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "credential.json")
+	// bilibili-cli 0.6.2 save_credential schema, including its non-cookie timestamp.
+	data := `{"sessdata":"session","bili_jct":"csrf","dedeuserid":"42","buvid3":"device","buvid4":"","ac_time_value":"","saved_at":1790000000.0}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadCredentialFile(path)
+	if err != nil || !c.Complete() || c.Cookies["DedeUserID"] != "42" || c.Cookies["bili_jct"] != "csrf" {
+		t.Fatalf("CLI export cannot be used by bridge: %v", err)
+	}
+	if _, ok := c.Cookies["saved_at"]; ok {
+		t.Fatal("metadata was imported as a cookie")
+	}
+}

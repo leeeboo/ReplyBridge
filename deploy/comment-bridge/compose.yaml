@@ -50,20 +50,8 @@ services:
         source: bridge-data
         target: /var/lib/shadowbrain
       - type: bind
-        source: ./secrets/feishu-app-secret
-        target: /run/shadowbrain/secrets/feishu-app-secret
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ./secrets/youtube-client.json
-        target: /run/shadowbrain/secrets/youtube-client.json
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ./secrets/youtube-token.json
-        target: /run/shadowbrain/secrets/youtube-token.json
+        source: ./secrets
+        target: /run/shadowbrain/secrets
         read_only: true
         bind:
           create_host_path: false

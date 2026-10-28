@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM --platform=$BUILDPLATFORM golang:1.26.5-bookworm@sha256:53eeac89074db483fdf0ab3be1df32bf6e47562263d2d0d6baa7f26acb4957dd AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS build
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -32,6 +32,7 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY --from=build --chown=root:root /out/shadowbrain-comment-bridge /app/shadowbrain-comment-bridge
+COPY --chown=root:root LICENSE THIRD_PARTY_NOTICES.md /usr/share/doc/replybridge/
 
 ENV HOME=/tmp/shadowbrain \
     TZ=Asia/Tokyo

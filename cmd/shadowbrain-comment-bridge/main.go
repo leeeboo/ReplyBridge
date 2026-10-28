@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	version                 = "0.1.21"
+	version                 = "0.1.22"
 	defaultDB               = "comment-bridge.db"
 	biliRiskAcknowledgement = "I_UNDERSTAND_BILIBILI_WEB_API_ACCOUNT_RISK"
 	maxSecretBytes          = 1 << 20

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
@@ -253,7 +254,7 @@ func New(config Config) (*Client, error) {
 	if !config.AllowAllGroupMembers && len(allowed) == 0 {
 		return nil, errors.New("feishu allowed open ids are required")
 	}
-	sdkClient := lark.NewClient(config.AppID, config.AppSecret, lark.WithLogLevel(larkcore.LogLevelWarn))
+	sdkClient := lark.NewClient(config.AppID, config.AppSecret, lark.WithLogLevel(larkcore.LogLevelWarn), lark.WithReqTimeout(20*time.Second))
 	return &Client{
 		config:    config,
 		sdkClient: sdkClient,

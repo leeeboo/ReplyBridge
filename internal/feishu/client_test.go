@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
@@ -24,6 +25,32 @@ type fakeSender struct {
 	messageID string
 	definite  bool
 	err       error
+}
+
+func TestClientRequestsHaveTimeoutAndPreserveUnknownOutcome(t *testing.T) {
+	old := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = old })
+	var tokenRequests, replyRequests int
+	http.DefaultTransport = identityRoundTrip(func(r *http.Request) (*http.Response, error) {
+		deadline, ok := r.Context().Deadline()
+		if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > 20*time.Second {
+			t.Error("SDK request must have a bounded 20s deadline")
+		}
+		if strings.Contains(r.URL.Path, "/auth/") {
+			tokenRequests++
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"code":0,"tenant_access_token":"test-token","expire":7200}`))}, nil
+		}
+		replyRequests++
+		return nil, context.DeadlineExceeded
+	})
+	c, err := New(Config{AppID: "timeout-regression-app", AppSecret: "test-secret", ChatID: "test-chat", AllowAllGroupMembers: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.ReplyToMessage(t.Context(), "test-parent", "test text", "test-action")
+	if !commentbridge.IsUnknownOutcome(err) || tokenRequests != 1 || replyRequests != 1 {
+		t.Fatalf("timeout must stay unknown without retry: token=%d reply=%d err=%v", tokenRequests, replyRequests, err)
+	}
 }
 
 func TestSendErrorAlertUsesGroupAndIdempotency(t *testing.T) {

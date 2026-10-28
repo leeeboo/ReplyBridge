@@ -8,7 +8,7 @@
 - 首次运行只建立当前评论基线，**不补发历史评论**。
 - YouTube 使用官方 [YouTube Data API `commentThreads.list`](https://developers.google.com/youtube/v3/docs/commentThreads/list) 轮询，并用官方 [`comments.insert`](https://developers.google.com/youtube/v3/docs/comments/insert) 回复。官方 [Comments resource](https://developers.google.com/youtube/v3/docs/comments) 没有评论点赞写接口：对 YouTube 通知添加飞书 👍 时，服务不会调用 YouTube API，而会由机器人引用原通知回复一次，提示打开评论直达链接手动点赞。
 - ChatFuse 仅覆盖 B 站 / YouTube 直播聊天读取，不能用于普通视频评论写入；其 `youtube.readonly` refresh token 不能复用。
-- B 站实验功能调用非官方 Web 接口（参考相邻 `bilibili-comment-studio` 的 `/x/v2/reply/up/fulllist`、`/x/v2/reply/add` 与评论点赞接口）。它不是官方、稳定或已确认合规的接口；默认关闭，使用前自行确认账号、条款和风险。点赞会使用当前 Cookie 对对应评论发起不可撤销的外部写入。
+- B 站实验功能调用非官方 Web 接口（`/x/v2/reply/up/fulllist`、`/x/v2/reply/add` 与评论点赞接口）。它不是官方、稳定或已确认合规的接口；默认关闭，使用前自行确认账号、条款和风险。点赞会使用当前 Cookie 对对应评论发起不可撤销的外部写入。
 - 不要把 app secret、Google client JSON、refresh token 或 B 站 Cookie 放入 dotenv、Git、聊天记录或命令行参数。二维码会公开发送到配置的群，这是本项目明确选择的群内协作方式；不要把二维码转发到群外。
 
 ## 构建与文件权限
@@ -25,7 +25,7 @@ chmod 600 ./secrets/feishu-app-secret
 
 ```bash
 chmod 600 ./secrets/feishu-app-secret ./secrets/youtube-client.json ./secrets/youtube-token.json
-chmod 600 "$HOME/.bili-sync/credential.json"
+chmod 600 ./bilibili-auth/credential.json
 ```
 
 ## 飞书内部应用机器人
@@ -122,6 +122,8 @@ YouTube 的官方 [Comments resource](https://developers.google.com/youtube/v3/d
 
 ## 异常告警（0.1.13）
 
+0.1.22 起飞书 HTTP 请求具有 20 秒超时，避免网络挂起阻塞工作队列；写请求超时仍保留 `unknown`，不会自动重试。
+
 机器人将抓取、存储、消息处理、回复、点赞、状态表情、登录与二维码错误合并通知到原目标群。每 30 秒检查待发告警及落库的 failed/unknown 任务；持续同类错误只报告一次，恢复后再次发生或新增失败任务最多每类 6 小时一条，全局至少间隔 10 分钟。首次上线会汇总此前尚未报告的失败任务；不会重新执行这些任务。告警类别和去重状态保存在 SQLite，重启不重复发送。发送失败或结果不确定的告警按 6 小时限频重试，不递归报警。仅发送固定类别，不发送上游错误正文、评论正文或密钥。
 
 进程停止、主机离线、飞书发送权限或网络不可用时，机器人无法即时通知；数据库不可用时退化为进程内每 6 小时至多一次的存储故障提示，无法保证跨重启去重。该功能不是独立的服务器存活监控。
@@ -134,12 +136,17 @@ YouTube 的官方 [Comments resource](https://developers.google.com/youtube/v3/d
 
 普通网络或其他读取错误仍暂停 B 站评论/弹幕读取至少 1 小时，连续失败按 1、2、4、8、16、24 小时退避；到期仅恢复读取验证，冷却及验证期间禁止回复和点赞。登录失效码 `-101/-111` 单独走凭据恢复流程，不能解除已经触发的风控停用。请求间 2–6 秒节流和定期休息保持不变。普通故障冷却仍在进程内维护，不得反复重启绕过；非官方接口始终存在账号风险。
 
-已有服务器继续使用外挂 Cookie，无需重新授权。首次配置可使用已安装的独立 `bili-sync` 授权工具取得 Cookie（默认路径通常为 `$HOME/.bili-sync/credential.json`）；该工具不从本项目或父项目构建：
+已有服务器继续使用外挂 Cookie，无需重新授权。首次配置使用公开的 [bilibili-cli](https://github.com/public-clis/bilibili-cli)，本项目兼容它保存的小写字段 JSON；详见[首次安装指南](quick-start.md#b站)。无需父项目或私有 `bili-sync` 二进制。
 
 ```bash
-bili-sync auth qr
-chmod 600 "$HOME/.bili-sync/credential.json"
+uv tool install bilibili-cli==0.6.2
+umask 077
+bili login
+mkdir -p -m 700 ./bilibili-auth
+test ! -e ./bilibili-auth/credential.json && install -m 600 "$HOME/.bilibili-cli/credential.json" ./bilibili-auth/credential.json
 ```
+
+这些命令仅用于首次安装。已运行服务的凭据刷新沿用群内扫码；不得用外部工具、换 Cookie 或重启绕过风控停用。配置 `SHADOWBRAIN_BILIBILI_CREDENTIAL_FILE=./bilibili-auth/credential.json`，并把账号 ID 填为预期创作者 UID，启动时会核对一致性。
 
 然后才可同时设置下列两个值，缺一不可：
 
@@ -148,7 +155,7 @@ SHADOWBRAIN_BILIBILI_EXPERIMENTAL_ENABLED=true
 SHADOWBRAIN_BILIBILI_EXPERIMENTAL_RISK_ACK=I_UNDERSTAND_BILIBILI_WEB_API_ACCOUNT_RISK
 ```
 
-这是账号风险确认，不代表接口获得官方支持、稳定性保证或合规结论。要停用，设 `ENABLED=false` 并清空 ACK；不要删除仍可能被其他 `bili-sync` 命令使用的凭据文件。
+这是账号风险确认，不代表接口获得官方支持、稳定性保证或合规结论。要停用，设 `ENABLED=false` 并清空 ACK；不要删除已有凭据或数据库。
 
 ### Cookie 失效告警
 
@@ -158,7 +165,7 @@ SHADOWBRAIN_BILIBILI_EXPERIMENTAL_RISK_ACK=I_UNDERSTAND_BILIBILI_WEB_API_ACCOUNT
 
 ## `.env.local` 完整桥接模板
 
-复制以下内容到未提交的 `.env.local`，再填写本机路径和标识。所有 secret 值保持在对应 `0600` 文件中而非这里。
+首次安装推荐复制根目录 `.env.example`；以下模板也可复制到未提交的 `.env.local`，再填写本机路径和标识。所有 secret 值保持在对应 `0600` 文件中而非这里。
 
 ```dotenv
 # Bridge SQLite / scheduling
@@ -194,8 +201,8 @@ SHADOWBRAIN_BILIBILI_EXPERIMENTAL_ENABLED=false
 # Must be empty unless deliberately enabling; exact required literal:
 # I_UNDERSTAND_BILIBILI_WEB_API_ACCOUNT_RISK
 SHADOWBRAIN_BILIBILI_EXPERIMENTAL_RISK_ACK=
-# 留空时使用当前账号的默认路径 ~/.bili-sync/credential.json；dotenv 不展开 $HOME。
-SHADOWBRAIN_BILIBILI_CREDENTIAL_FILE=
+# 新安装显式使用独立副本；旧的默认路径 ~/.bili-sync/credential.json 保持兼容。
+SHADOWBRAIN_BILIBILI_CREDENTIAL_FILE=./bilibili-auth/credential.json
 # 可留空；默认从 Cookie 取得 DedeUserID；若填写则必须与 Cookie 一致。
 SHADOWBRAIN_BILIBILI_ACCOUNT_ID=
 # 单个有变化评论线程的子回复分页上限：1-50，默认 10。
